@@ -119,12 +119,12 @@ jobs:
                   read -ra _tokens <<< \"\$(echo \"\${makedeps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
                   for tok in \"\${_tokens[@]}\"; do
                     # remove surrounding quotes/backticks
-                    tok=\"\${tok%\\\"}\"; tok=\"\${tok#\\\"}\"
-                    tok=\"\${tok%\\'}\"; tok=\"\${tok#\\'}\"
-                    tok=\"\${tok%\\`}\"; tok=\"\${tok#\\`}\"
+                    tok=\${tok//\\\"/}
+                    tok=\${tok//\\'/}
+                    tok=\${tok//\\\`/}
                     # strip version comparators and everything after (>=, <=, =, <, >, :)
                     # capture leading package name: letters, numbers, dots, plus, underscore, hyphen, @
-                    sanitized=\$(echo \"\$tok\" | sed -E 's/^([A-Za-z0-9@+_.:-]+).*/\\1/' | sed -E 's/([<>=:].*)$//')
+                    sanitized=\$(echo \"\$tok\" | sed -E 's/^([A-Za-z0-9@+_.:-]+).*/\\\\1/' | sed -E 's/([<>=:].*)$//')
                     # further strip trailing punctuation if any
                     sanitized=\$(echo \"\$sanitized\" | sed -E 's/[^A-Za-z0-9@+_.-].*$//')
                     # ignore empty
