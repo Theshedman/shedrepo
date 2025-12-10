@@ -39,12 +39,31 @@ jobs:
           gpg --list-secret-keys --keyid-format LONG
         shell: bash
 
-      - name: Install docker (if not already present) and rclone (for upload later)
+      - name: Install Docker (if needed) and rclone
         run: |
-          sudo apt-get update
-          sudo apt-get install -y docker.io
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone --version
+          set -euo pipefail
+
+          # If docker exists already on the runner, skip installation.
+          if command -v docker >/dev/null 2>&1; then
+            echo "docker already installed: $(docker --version)"
+          else
+            echo "Installing docker using official convenience script"
+            # The convenience script handles dependencies and typical conflicts.
+            # It runs as root and installs docker for the current distro.
+            curl -fsSL https://get.docker.com | sudo sh
+            sudo usermod -aG docker $USER || true
+            echo "docker installed: $(docker --version || true)"
+          fi
+
+          # Install rclone if missing (official install script)
+          if command -v rclone >/dev/null 2>&1; then
+            echo "rclone already installed: $(rclone --version)"
+          else
+            echo "Installing rclone"
+            curl -fsSL https://rclone.org/install.sh | sudo bash
+            rclone --version
+          fi
+        shell: bash
 
       - name: Build AUR packages from manifest (serial)
         run: |
