@@ -106,9 +106,10 @@ jobs:
 
                 # read PKGBUILD to extract makedepends (common multi-line array supported)
                 cd \"\${AUR_TMP_DIR}\"
-                makedeps_raw=$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
-                if [[ -z "${makedeps_raw// }" ]]; then
-                  makedeps_raw=$(grep -oP '(?<=makedepends=\().*(?=\))' PKGBUILD 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
+                makedeps_raw=\"\"
+                makedeps_raw=\$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
+                if [[ -z \"\${makedeps_raw// }\" ]]; then
+                  makedeps_raw=\$(grep -oP '(?<=makedepends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
                 fi
 
                 # sanitize tokens: split, remove quotes/backticks, strip version constraints like >=1.24, =1.2, <2, :foo variants
