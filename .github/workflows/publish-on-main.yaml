@@ -43,19 +43,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If docker exists already on the runner, skip installation.
           if command -v docker >/dev/null 2>&1; then
             echo "docker already installed: $(docker --version)"
           else
             echo "Installing docker using official convenience script"
-            # The convenience script handles dependencies and typical conflicts.
-            # It runs as root and installs docker for the current distro.
             curl -fsSL https://get.docker.com | sudo sh
             sudo usermod -aG docker $USER || true
             echo "docker installed: $(docker --version || true)"
           fi
 
-          # Install rclone if missing (official install script)
           if command -v rclone >/dev/null 2>&1; then
             echo "rclone already installed: $(rclone --version)"
           else
@@ -65,38 +61,57 @@ jobs:
           fi
         shell: bash
 
-      - name: Build AUR packages from manifest (serial)
+      - name: Build AUR packages from manifest (serial, non-root inside container)
+        env:
+          # keep host ARCH available to container via --env as well
+          ARCH: ${{ env.ARCH }}
         run: |
           set -euo pipefail
+
           ART_DIR="${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
+
+          # Read manifest line-by-line
           while IFS= read -r pkg || [ -n "$pkg" ]; do
+            # trim whitespace
             pkg="$(echo "$pkg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -z "$pkg" ]] && continue
             echo "==> Building package: $pkg"
-            # run build inside arch container; mount workspace and artifacts dir
+
+            # Run build inside an archlinux container as follows:
+            # 1) create builder user BEFORE pacman runs to avoid /etc locking problems
+            # 2) init pacman keyring & populate
+            # 3) install base-devel and deps
+            # 4) ensure script is executable and run as builder (non-root)
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
-              --env "ARCH=${ARCH}" --env "MAKEPKG_ALLOW_ROOT=1" archlinux:latest /bin/bash -lc "
+              --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
                 set -euo pipefail
 
-                # Initialize keyring and populate BEFORE doing upgrades that may need a key
+                # create non-root builder user first to avoid /etc locking races
+                useradd -m -s /bin/bash builder || true
+                chown -R builder:builder /workspace || true
+
+                # initialize and populate pacman keyring
                 pacman-key --init
                 pacman-key --populate archlinux
 
-                # Update keyring package itself (safe now that keyring is initialized)
+                # update keyring package (safe now)
                 pacman -Sy --noconfirm archlinux-keyring || true
 
-                # Now perform full upgrade (optional), then install build deps
+                # system upgrade and install build deps
                 pacman -Syu --noconfirm || true
-
-                # Install required build tools (base-devel contains makepkg)
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
 
-                cd /workspace
+                # ensure build script is executable in the container mount
+                chmod +x /workspace/scripts/build-aur.sh || true
 
-                # Run build script as root (CI). The script should respect MAKEPKG_ALLOW_ROOT when root.
-                /workspace/scripts/build-aur.sh \"${pkg}\" \"/workspace/${ARTIFACT_OUT}\"
-            "
+                # run build as non-root 'builder' user (no sudo)
+                su -s /bin/bash builder -c \"
+                  cd /workspace
+                  /workspace/scripts/build-aur.sh '${pkg}' '/workspace/${ARTIFACT_OUT}'
+                \"
+              "
           done < packages/aur/manifest.txt
+        shell: bash
 
       - name: Show artifacts
         run: |
@@ -106,26 +121,32 @@ jobs:
       - name: Move artifacts into repo output dir
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}"
-          # copy all .pkg.* and optional .sig into repo arch dir
+          # copy all .pkg.* and optional .sig into repo arch dir (preserve names)
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \;
+          # also copy signatures if present
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*.sig' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \; || true
           ls -la "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}" || true
+        shell: bash
 
       - name: Ensure shedrepo scripts executable
         run: chmod +x shedrepo/shedrepo/commands/*.sh
+        shell: bash
 
       - name: Set REPO_ROOT env for gen_db
         run: |
           echo "REPO_ROOT=${GITHUB_WORKSPACE}/${REPO_OUT}" >> $GITHUB_ENV
           echo "ARCH=${ARCH}" >> $GITHUB_ENV
+        shell: bash
 
       - name: Regenerate DB (gen_db.sh)
         run: |
           ./shedrepo/shedrepo/commands/gen_db.sh
+        shell: bash
 
       - name: Configure rclone remote for R2
         run: |
-          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}"
+          # choose remote name, default 'r2' if not set
+          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}"
           R2_ENDPOINT="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           rclone config create "${RCLONE_REMOTE}" s3 \
             env_auth false \
@@ -134,14 +155,18 @@ jobs:
             endpoint "${R2_ENDPOINT}" \
             region auto
           echo "rclone remote '${RCLONE_REMOTE}' configured"
+        shell: bash
 
       - name: Upload repo to R2
         run: |
-          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}"
+          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}"
           TARGET="${RCLONE_REMOTE}:${{ secrets.R2_BUCKET }}/${ARCH}/"
           rclone sync --progress --create-empty-src-dirs --delete-after "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" "${TARGET}"
           echo "Upload finished."
+        shell: bash
 
       - name: Cleanup rclone remote
         if: always()
-        run: rclone config delete "${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}" || true
+        run: |
+          rclone config delete "${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}" || true
+        shell: bash
