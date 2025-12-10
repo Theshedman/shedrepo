@@ -2,6 +2,14 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Allow makepkg to run as root in CI (not recommended on real hosts, but OK for CI)
+if [[ "$(id -u)" -eq 0 ]]; then
+  export MAKEPKG_ALLOW_ROOT=1
+  CI_BUILD_AS_ROOT=true
+else
+  CI_BUILD_AS_ROOT=false
+fi
+
 # scripts/build-aur.sh <pkgname> <artifacts_dir>
 # This script is intended to run INSIDE an archlinux:latest container as root,
 # and will build as a non-root 'builder' user to run makepkg safely.

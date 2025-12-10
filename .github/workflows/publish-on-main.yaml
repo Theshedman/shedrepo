@@ -84,10 +84,6 @@ jobs:
               pacman -Syu --noconfirm || true
               pacman -Sy --noconfirm --needed base-devel git fakeroot sudo gnupg curl pacman-contrib
 
-              useradd -m -G users,wheel builder || true
-              passwd -l builder >/dev/null 2>&1 || true
-              chown -R builder:builder /home/builder || true
-
               cd /workspace
               sudo -u builder /workspace/scripts/build-aur.sh \"\$PKG\" \"/workspace/${ARTIFACT_OUT}\"
             "
