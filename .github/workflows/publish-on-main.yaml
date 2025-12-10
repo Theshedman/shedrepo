@@ -77,75 +77,67 @@ jobs:
             echo "==> Building package: $pkg"
 
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
-              --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
+              --env "ARCH=${ARCH}" --env "PKG=${pkg}" archlinux:latest /bin/bash -lc "
                 set -euo pipefail
 
-                # 1) Create non-root builder before pacman operations
+                # 1) create builder early
                 useradd -m -s /bin/bash builder || true
                 chown -R builder:builder /workspace || true
 
-                # 2) Init & populate pacman keyring BEFORE upgrading packages
+                # 2) init keyring before upgrades
                 pacman-key --init
                 pacman-key --populate archlinux
 
-                # 3) Update keyring and install base-devel & helpers
+                # 3) update keyring and install core build tools
                 pacman -Sy --noconfirm archlinux-keyring || true
                 pacman -Syu --noconfirm || true
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
 
-                # 4) Prepare a temp clone of the AUR package so we can install makedepends as root
-                TMPDIR=\$(mktemp -d /tmp/aurbuild.XXXXXX)
-                # prefer canonical packages/<pkg>.git path; fallback to short form
-                git clone --depth 1 \"https://aur.archlinux.org/packages/${pkg}.git\" \"\${TMPDIR}\" 2>/dev/null || \
-                  git clone --depth 1 \"https://aur.archlinux.org/${pkg}.git\" \"\${TMPDIR}\"
+                # 4) clone package into tempdir (prefer packages/<pkg>.git)
+                TMPDIR=$(mktemp -d /tmp/aurbuild.XXXXXX)
+                git clone --depth 1 "https://aur.archlinux.org/packages/${PKG}.git" "${TMPDIR}" 2>/dev/null || \
+                  git clone --depth 1 "https://aur.archlinux.org/${PKG}.git" "${TMPDIR}"
 
-                if [[ ! -d \"\${TMPDIR}\" ]]; then
-                  echo \"[ERROR] Failed to clone AUR package: ${pkg}\" >&2
+                if [[ ! -d "${TMPDIR}" ]]; then
+                  echo "[ERROR] Failed to clone AUR package: ${PKG}" >&2
                   exit 3
                 fi
 
-                cd \"\${TMPDIR}\"
+                cd "${TMPDIR}"
 
-                # 5) Extract simple makedepends array from PKGBUILD (common case)
+                # 5) extract makedepends in a robust way (strip version constraints like >=1.24)
+                makedeps_raw=$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
+                # fallback: single-line grep
+                if [[ -z "${makedeps_raw// }" ]]; then
+                  makedeps_raw=$(grep -oP '(?<=makedepends=\().*(?=\))' PKGBUILD 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
+                fi
+
+                # normalize into space-separated tokens and strip version constraints (like >=1.24, =1.2)
                 makedeps=''
-                if [[ -f PKGBUILD ]]; then
-                  makedeps=$(awk '
-                    BEGIN { capture=0; deps="" }
-                    /makedepends[[:space:]]*=.*\(/ { capture=1; sub(/.*\(/, ""); line=$0 }
-                    capture && /\)/ { sub(/\).*/, ""); deps = deps " " line; capture=0 }
-                    capture { deps = deps " " \$0 }
-                    END {
-                      gsub(/[^[:alnum:]_\-:\/.]/, " ", deps);
-                      gsub(/[[:space:]]+/, " ", deps);
-                      gsub(/^[[:space:]]+|[[:space:]]+$/, "", deps);
-                      print deps
-                    }' PKGBUILD)
-
-                  if [[ -z \"\${makedeps}\" ]]; then
-                    makedeps=\$(grep -oP '(?<=makedepends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
-                  fi
+                if [[ -n "${makedeps_raw// }" ]]; then
+                  # split into words, remove quotes/backticks, remove version comparisons
+                  makedeps=$(echo "${makedeps_raw}" | tr '\n' ' ' | tr -s ' ' ' ' | sed 's/[\"'\'\`']//g' | xargs -n1 echo | sed -E 's/([^\<\>\=\:]+).*/\1/' | xargs)
                 fi
 
-                # 6) Install makedepends as root if any (non-interactive)
-                if [[ -n \"\${makedeps// }\" ]]; then
-                  echo \"[INFO] Installing makedepends for ${pkg}: \${makedeps}\"
-                  read -r -a deps_array <<< \"\${makedeps}\"
-                  pacman -Sy --noconfirm --needed \"\${deps_array[@]}\" || true
+                # 6) install makedepends as root (non-interactive)
+                if [[ -n "${makedeps// }" ]]; then
+                  echo "[INFO] Installing makedepends for ${pkg}: ${makedeps}"
+                  pacman -Sy --noconfirm --needed ${makedeps} || true
                 else
-                  echo \"[INFO] No makedepends detected for ${pkg}\"
+                  echo "[INFO] No makedepends detected for ${PKG}"
                 fi
 
-                # 7) Move cloned source to a stable path inside workspace and change ownership
-                BUILD_SRC_DIR=\"/workspace/.aur_src_${pkg}\"
-                rm -rf \"\${BUILD_SRC_DIR}\" || true
-                mv \"\${TMPDIR}\" \"\${BUILD_SRC_DIR}\"
-                chown -R builder:builder \"\${BUILD_SRC_DIR}\"
+                # 7) move source into workspace stable path and chown
+                BUILD_SRC_DIR="/workspace/.aur_src_${PKG}"
+                rm -rf "${BUILD_SRC_DIR}" || true
+                mv "${TMPDIR}" "${BUILD_SRC_DIR}"
+                chown -R builder:builder "${BUILD_SRC_DIR}"
 
-                # 8) Run the build script as non-root builder; pass local PKGBUILD dir to avoid re-clone
-                su -s /bin/bash builder -c \"
+                # 8) run build script as builder (non-root) using the local PKGBUILD dir (no re-clone)
+                su -s /bin/bash builder -c "
                   cd /workspace
-                  /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
-                \"
+                  /workspace/scripts/build-aur.sh '${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
+                "
 
                 # done inside container
               "
