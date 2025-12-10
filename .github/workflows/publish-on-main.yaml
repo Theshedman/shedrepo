@@ -30,7 +30,7 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
           ls -la packages/aur || true
 
-      - name: Import GPG private key (for signing packages if needed)
+      - name: Import GPG private key (host for repo signing)
         if: ${{ env.GPG_PRIVATE_KEY != '' }}
         run: |
           echo "${{ env.GPG_PRIVATE_KEY }}" > /tmp/gpg_private.asc
@@ -42,14 +42,12 @@ jobs:
       - name: Install Docker (if needed) and rclone
         run: |
           set -euo pipefail
-
           if command -v docker >/dev/null 2>&1; then
             echo "docker already installed: $(docker --version)"
           else
             echo "Installing docker using official convenience script"
             curl -fsSL https://get.docker.com | sudo sh
             sudo usermod -aG docker $USER || true
-            echo "docker installed: $(docker --version || true)"
           fi
 
           if command -v rclone >/dev/null 2>&1; then
@@ -57,79 +55,117 @@ jobs:
           else
             echo "Installing rclone"
             curl -fsSL https://rclone.org/install.sh | sudo bash
-            rclone --version
           fi
+        shell: bash
+
+      - name: Ensure scripts are executable
+        run: |
+          chmod +x scripts/build-aur.sh || true
+          chmod +x shedrepo/shedrepo/commands/*.sh || true
         shell: bash
 
       - name: Build AUR packages from manifest (serial, non-root inside container)
         env:
-          # keep host ARCH available to container via --env as well
           ARCH: ${{ env.ARCH }}
         run: |
           set -euo pipefail
-
           ART_DIR="${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
 
-          # Read manifest line-by-line
           while IFS= read -r pkg || [ -n "$pkg" ]; do
-            # trim whitespace
             pkg="$(echo "$pkg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -z "$pkg" ]] && continue
             echo "==> Building package: $pkg"
 
-            # Run build inside an archlinux container as follows:
-            # 1) create builder user BEFORE pacman runs to avoid /etc locking problems
-            # 2) init pacman keyring & populate
-            # 3) install base-devel and deps
-            # 4) ensure script is executable and run as builder (non-root)
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
               --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
                 set -euo pipefail
 
-                # create non-root builder user first to avoid /etc locking races
+                # 1) Create non-root builder before pacman operations
                 useradd -m -s /bin/bash builder || true
                 chown -R builder:builder /workspace || true
 
-                # initialize and populate pacman keyring
+                # 2) Init & populate pacman keyring BEFORE upgrading packages
                 pacman-key --init
                 pacman-key --populate archlinux
 
-                # update keyring package (safe now)
+                # 3) Update keyring and install base-devel & helpers
                 pacman -Sy --noconfirm archlinux-keyring || true
-
-                # system upgrade and install build deps
                 pacman -Syu --noconfirm || true
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
 
-                # ensure build script is executable in the container mount
-                chmod +x /workspace/scripts/build-aur.sh || true
+                # 4) Prepare a temp clone of the AUR package so we can install makedepends as root
+                TMPDIR=\$(mktemp -d /tmp/aurbuild.XXXXXX)
+                # prefer canonical packages/<pkg>.git path; fallback to short form
+                git clone --depth 1 \"https://aur.archlinux.org/packages/${pkg}.git\" \"\${TMPDIR}\" 2>/dev/null || \
+                  git clone --depth 1 \"https://aur.archlinux.org/${pkg}.git\" \"\${TMPDIR}\"
 
-                # run build as non-root 'builder' user (no sudo)
+                if [[ ! -d \"\${TMPDIR}\" ]]; then
+                  echo \"[ERROR] Failed to clone AUR package: ${pkg}\" >&2
+                  exit 3
+                fi
+
+                cd \"\${TMPDIR}\"
+
+                # 5) Extract simple makedepends array from PKGBUILD (common case)
+                makedeps=''
+                if [[ -f PKGBUILD ]]; then
+                  makedeps=\$(awk '
+                    BEGIN { capture=0; deps=\"\" }
+                    /makedepends[[:space:]]*=.*\\(/ { capture=1; sub(/.*\\(/, \"\"); line=$0 }
+                    capture && /\)/ { sub(/\\).*/, \"\"); deps = deps \" \" line; capture=0 }
+                    capture { deps = deps \" \" $0 }
+                    END {
+                      gsub(/[^[:alnum:]_\\-:\\/.]/, \" \", deps);
+                      gsub(/[[:space:]]+/, \" \", deps);
+                      gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", deps);
+                      print deps
+                    }' PKGBUILD)
+
+                  if [[ -z \"\${makedeps}\" ]]; then
+                    makedeps=\$(grep -oP '(?<=makedepends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
+                  fi
+                fi
+
+                # 6) Install makedepends as root if any (non-interactive)
+                if [[ -n \"\${makedeps// }\" ]]; then
+                  echo \"[INFO] Installing makedepends for ${pkg}: \${makedeps}\"
+                  read -r -a deps_array <<< \"\${makedeps}\"
+                  pacman -Sy --noconfirm --needed \"\${deps_array[@]}\" || true
+                else
+                  echo \"[INFO] No makedepends detected for ${pkg}\"
+                fi
+
+                # 7) Move cloned source to a stable path inside workspace and change ownership
+                BUILD_SRC_DIR=\"/workspace/.aur_src_${pkg}\"
+                rm -rf \"\${BUILD_SRC_DIR}\" || true
+                mv \"\${TMPDIR}\" \"\${BUILD_SRC_DIR}\"
+                chown -R builder:builder \"\${BUILD_SRC_DIR}\"
+
+                # 8) Run the build script as non-root builder; pass local PKGBUILD dir to avoid re-clone
                 su -s /bin/bash builder -c \"
                   cd /workspace
-                  /workspace/scripts/build-aur.sh '${pkg}' '/workspace/${ARTIFACT_OUT}'
+                  /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
                 \"
+
+                # done inside container
               "
           done < packages/aur/manifest.txt
+
+          echo "[INFO] Build loop completed"
         shell: bash
 
       - name: Show artifacts
         run: |
           echo "Artifacts dir listing:"
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -maxdepth 3 -ls || true
+        shell: bash
 
       - name: Move artifacts into repo output dir
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}"
-          # copy all .pkg.* and optional .sig into repo arch dir (preserve names)
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \;
-          # also copy signatures if present
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*.sig' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \; || true
           ls -la "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}" || true
-        shell: bash
-
-      - name: Ensure shedrepo scripts executable
-        run: chmod +x shedrepo/shedrepo/commands/*.sh
         shell: bash
 
       - name: Set REPO_ROOT env for gen_db
@@ -145,7 +181,6 @@ jobs:
 
       - name: Configure rclone remote for R2
         run: |
-          # choose remote name, default 'r2' if not set
           RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}"
           R2_ENDPOINT="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           rclone config create "${RCLONE_REMOTE}" s3 \
