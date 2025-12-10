@@ -107,12 +107,15 @@ jobs:
                 # read PKGBUILD to extract both depends and makedepends
                 cd \"\${AUR_TMP_DIR}\"
                 
+                echo \"[DEBUG] Extracting dependencies from PKGBUILD...\"
+                
                 # Extract depends array
                 depends_raw=\"\"
                 depends_raw=\$(sed -n '/^[[:space:]]*depends[[:space:]]*=/{:a; N; /)/!ba; s/.*depends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
                 if [[ -z \"\${depends_raw// }\" ]]; then
                   depends_raw=\$(grep -oP '(?<=depends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
                 fi
+                echo \"[DEBUG] depends_raw: \${depends_raw}\"
                 
                 # Extract makedepends array
                 makedeps_raw=\"\"
@@ -120,9 +123,16 @@ jobs:
                 if [[ -z \"\${makedeps_raw// }\" ]]; then
                   makedeps_raw=\$(grep -oP '(?<=makedepends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
                 fi
+                echo \"[DEBUG] makedeps_raw: \${makedeps_raw}\"
+                
+                # Show actual PKGBUILD content for debugging
+                echo \"[DEBUG] PKGBUILD depends/makedepends sections:\"
+                grep -A 10 '^depends=' PKGBUILD 2>/dev/null || echo \"  (no depends= found)\"
+                grep -A 10 '^makedepends=' PKGBUILD 2>/dev/null || echo \"  (no makedepends= found)\"
                 
                 # Combine both dependency lists
                 all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
+                echo \"[DEBUG] all_deps_raw: \${all_deps_raw}\"
 
                 # sanitize tokens: split, remove quotes/backticks, strip version constraints
                 deps_list=()
