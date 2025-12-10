@@ -159,8 +159,32 @@ jobs:
 
                 # install all dependencies as root (non-interactive) if any
                 if [[ \${#deps_list[@]} -gt 0 ]]; then
-                  echo \"[INFO] Installing dependencies for \${PKG}: \${deps_list[*]}\"
-                  pacman -Sy --noconfirm --needed \"\${deps_list[@]}\" || true
+                  echo \"[INFO] Dependencies to install for \${PKG}: \${deps_list[*]}\"
+                  
+                  # Sync package database first
+                  pacman -Sy --noconfirm 2>&1 | head -n 5
+                  
+                  # Try to install all at once first (faster)
+                  if pacman -S --noconfirm --needed \"\${deps_list[@]}\" 2>&1 | tee /tmp/pacman-install.log; then
+                    echo \"[INFO] All dependencies installed successfully\"
+                  else
+                    echo \"[WARN] Batch install failed, trying individually...\"
+                    # Try installing one by one to see which ones fail
+                    failed_deps=()
+                    for dep in \"\${deps_list[@]}\"; do
+                      if pacman -S --noconfirm --needed \"\$dep\" 2>/dev/null; then
+                        echo \"[OK] Installed: \$dep\"
+                      else
+                        echo \"[WARN] Could not install: \$dep\"
+                        failed_deps+=(\"\$dep\")
+                      fi
+                    done
+                    
+                    if [[ \${#failed_deps[@]} -gt 0 ]]; then
+                      echo \"[WARN] Failed dependencies: \${failed_deps[*]}\"
+                      echo \"[INFO] Continuing - makepkg will report if these are critical\"
+                    fi
+                  fi
                 else
                   echo \"[INFO] No dependencies detected for \${PKG}\"
                 fi
