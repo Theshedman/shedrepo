@@ -61,7 +61,7 @@ jobs:
       - name: Ensure scripts are executable
         run: |
           chmod +x scripts/build-aur.sh || true
-          chmod +x shedrepo/shedrepo/commands/*.sh || true
+          chmod +x shedrepo/commands/*.sh || true
         shell: bash
 
       - name: Build AUR packages from manifest (serial, non-root inside container)
@@ -109,15 +109,15 @@ jobs:
                 # 5) Extract simple makedepends array from PKGBUILD (common case)
                 makedeps=''
                 if [[ -f PKGBUILD ]]; then
-                  makedeps=\$(awk '
-                    BEGIN { capture=0; deps=\"\" }
-                    /makedepends[[:space:]]*=.*\\(/ { capture=1; sub(/.*\\(/, \"\"); line=$0 }
-                    capture && /\)/ { sub(/\\).*/, \"\"); deps = deps \" \" line; capture=0 }
-                    capture { deps = deps \" \" $0 }
+                  makedeps=$(awk '
+                    BEGIN { capture=0; deps="" }
+                    /makedepends[[:space:]]*=.*\(/ { capture=1; sub(/.*\(/, ""); line=$0 }
+                    capture && /\)/ { sub(/\).*/, ""); deps = deps " " line; capture=0 }
+                    capture { deps = deps " " \$0 }
                     END {
-                      gsub(/[^[:alnum:]_\\-:\\/.]/, \" \", deps);
-                      gsub(/[[:space:]]+/, \" \", deps);
-                      gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", deps);
+                      gsub(/[^[:alnum:]_\-:\/.]/, " ", deps);
+                      gsub(/[[:space:]]+/, " ", deps);
+                      gsub(/^[[:space:]]+|[[:space:]]+$/, "", deps);
                       print deps
                     }' PKGBUILD)
 
