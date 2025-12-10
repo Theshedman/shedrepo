@@ -42,7 +42,7 @@ else
   PKG_NAME="$PKG_ARG"
   echo "[INFO] Cloning AUR package: $PKG_NAME"
   # Attempt to clone via HTTPS; fallback if needed
-  git clone --depth 1 "https://aur.archlinux.org/${PKG_NAME}.git" "$BUILD_ROOT" || {
+  git clone --depth 1 "https://aur.archlinux.org/packages/${PKG_NAME}" "$BUILD_ROOT" || {
     echo "[ERROR] Failed to clone AUR package: ${PKG_NAME}" >&2
     exit 3
   }

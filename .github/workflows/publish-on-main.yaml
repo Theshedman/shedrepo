@@ -78,13 +78,17 @@ jobs:
               --env "ARCH=${ARCH}" --env "MAKEPKG_ALLOW_ROOT=1" archlinux:latest /bin/bash -lc "
                 set -euo pipefail
 
-                # pacman/keyring bootstrap
-                pacman -Sy --noconfirm archlinux-keyring || true
+                # Initialize keyring and populate BEFORE doing upgrades that may need a key
                 pacman-key --init
                 pacman-key --populate archlinux
+
+                # Update keyring package itself (safe now that keyring is initialized)
+                pacman -Sy --noconfirm archlinux-keyring || true
+
+                # Now perform full upgrade (optional), then install build deps
                 pacman -Syu --noconfirm || true
 
-                # install build deps
+                # Install required build tools (base-devel contains makepkg)
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
 
                 cd /workspace
