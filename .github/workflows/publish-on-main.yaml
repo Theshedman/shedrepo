@@ -104,19 +104,31 @@ jobs:
                   exit 3
                 fi
 
-                # read PKGBUILD to extract makedepends (common multi-line array supported)
+                # read PKGBUILD to extract both depends and makedepends
                 cd \"\${AUR_TMP_DIR}\"
+                
+                # Extract depends array
+                depends_raw=\"\"
+                depends_raw=\$(sed -n '/^[[:space:]]*depends[[:space:]]*=/{:a; N; /)/!ba; s/.*depends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
+                if [[ -z \"\${depends_raw// }\" ]]; then
+                  depends_raw=\$(grep -oP '(?<=depends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
+                fi
+                
+                # Extract makedepends array
                 makedeps_raw=\"\"
                 makedeps_raw=\$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
                 if [[ -z \"\${makedeps_raw// }\" ]]; then
                   makedeps_raw=\$(grep -oP '(?<=makedepends=\\().*(?=\\))' PKGBUILD 2>/dev/null | tr -d '\"' | tr '\\n' ' ' || true)
                 fi
+                
+                # Combine both dependency lists
+                all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
 
-                # sanitize tokens: split, remove quotes/backticks, strip version constraints like >=1.24, =1.2, <2, :foo variants
-                makedeps_list=()
-                if [[ -n \"\${makedeps_raw// }\" ]]; then
+                # sanitize tokens: split, remove quotes/backticks, strip version constraints
+                deps_list=()
+                if [[ -n \"\${all_deps_raw// }\" ]]; then
                   # split into words safely
-                  read -ra _tokens <<< \"\$(echo \"\${makedeps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
+                  read -ra _tokens <<< \"\$(echo \"\${all_deps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
                   for tok in \"\${_tokens[@]}\"; do
                     # remove surrounding quotes/backticks
                     tok=\${tok//\\\"/}
@@ -126,31 +138,31 @@ jobs:
                     tok=\${tok%%[<>=:]*}
                     # ignore empty
                     if [[ -n \"\$tok\" ]]; then
-                      makedeps_list+=(\"\$tok\")
+                      deps_list+=(\"\$tok\")
                     fi
                   done
                 fi
 
                 # deduplicate
-                if [[ \${#makedeps_list[@]} -gt 0 ]]; then
+                if [[ \${#deps_list[@]} -gt 0 ]]; then
                   # unique-preserve order
                   declare -A seen=()
                   uniq_list=()
-                  for p in \"\${makedeps_list[@]}\"; do
+                  for p in \"\${deps_list[@]}\"; do
                     if [[ -z \"\${seen[\$p]+_}\" ]]; then
                       uniq_list+=(\"\$p\")
                       seen[\$p]=1
                     fi
                   done
-                  makedeps_list=(\"\${uniq_list[@]}\")
+                  deps_list=(\"\${uniq_list[@]}\")
                 fi
 
-                # install makedepends as root (non-interactive) if any
-                if [[ \${#makedeps_list[@]} -gt 0 ]]; then
-                  echo \"[INFO] Installing makedepends for \${PKG}: \${makedeps_list[*]}\"
-                  pacman -Sy --noconfirm --needed \"\${makedeps_list[@]}\" || true
+                # install all dependencies as root (non-interactive) if any
+                if [[ \${#deps_list[@]} -gt 0 ]]; then
+                  echo \"[INFO] Installing dependencies for \${PKG}: \${deps_list[*]}\"
+                  pacman -Sy --noconfirm --needed \"\${deps_list[@]}\" || true
                 else
-                  echo \"[INFO] No makedepends detected for \${PKG}\"
+                  echo \"[INFO] No dependencies detected for \${PKG}\"
                 fi
 
                 # IMPORTANT: cd out before moving the temp dir to avoid getcwd errors
