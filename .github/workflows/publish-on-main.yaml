@@ -75,17 +75,22 @@ jobs:
             echo "==> Building package: $pkg"
             # run build inside arch container; mount workspace and artifacts dir
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
-              --env "PKG=${pkg}" --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
-              set -euo pipefail
+              --env "ARCH=${ARCH}" --env "MAKEPKG_ALLOW_ROOT=1" archlinux:latest /bin/bash -lc "
+                set -euo pipefail
 
-              pacman -Sy --noconfirm archlinux-keyring || true
-              pacman-key --init
-              pacman-key --populate archlinux
-              pacman -Syu --noconfirm || true
-              pacman -Sy --noconfirm --needed base-devel git fakeroot sudo gnupg curl pacman-contrib
+                # pacman/keyring bootstrap
+                pacman -Sy --noconfirm archlinux-keyring || true
+                pacman-key --init
+                pacman-key --populate archlinux
+                pacman -Syu --noconfirm || true
 
-              cd /workspace
-              sudo -u builder /workspace/scripts/build-aur.sh \"\$PKG\" \"/workspace/${ARTIFACT_OUT}\"
+                # install build deps
+                pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
+
+                cd /workspace
+
+                # Run build script as root (CI). The script should respect MAKEPKG_ALLOW_ROOT when root.
+                /workspace/scripts/build-aur.sh \"${pkg}\" \"/workspace/${ARTIFACT_OUT}\"
             "
           done < packages/aur/manifest.txt
 
