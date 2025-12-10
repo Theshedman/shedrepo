@@ -16,6 +16,8 @@ env:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,9 +31,9 @@ jobs:
           ls -la packages/aur || true
 
       - name: Import GPG private key (for signing packages if needed)
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        if: ${{ env.GPG_PRIVATE_KEY != '' }}
         run: |
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" > /tmp/gpg_private.asc
+          echo "${{ env.GPG_PRIVATE_KEY }}" > /tmp/gpg_private.asc
           gpg --batch --import /tmp/gpg_private.asc || true
           shred -u /tmp/gpg_private.asc || rm -f /tmp/gpg_private.asc
           gpg --list-secret-keys --keyid-format LONG
