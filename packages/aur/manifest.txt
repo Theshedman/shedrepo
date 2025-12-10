@@ -1,4 +1,4 @@
-yay-bin
+yay
 walker
 hadolint-bin
 auto-cpufreq
