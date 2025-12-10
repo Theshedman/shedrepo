@@ -109,24 +109,15 @@ jobs:
                 
                 echo \"[DEBUG] Extracting dependencies from PKGBUILD...\"
                 
-                # Use bash to source and extract arrays properly
+                # Extract depends using awk (handles multi-line arrays)
                 depends_raw=\"\"
+                depends_raw=\$(awk '/^depends=\\(/,/)/ {print}' PKGBUILD | sed 's/depends=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
+                echo \"[DEBUG] Extracted depends: \${depends_raw}\"
+                
+                # Extract makedepends using awk (handles multi-line arrays)
                 makedeps_raw=\"\"
-                
-                # Extract using bash eval in a safe way
-                eval \"\$(grep -E '^[[:space:]]*depends=' PKGBUILD | head -1)\" 2>/dev/null || true
-                if [[ -n \"\${depends[@]}\" ]]; then
-                  depends_raw=\"\${depends[*]}\"
-                  echo \"[DEBUG] Extracted depends: \${depends_raw}\"
-                fi
-                unset depends
-                
-                eval \"\$(grep -E '^[[:space:]]*makedepends=' PKGBUILD | head -1)\" 2>/dev/null || true
-                if [[ -n \"\${makedepends[@]}\" ]]; then
-                  makedeps_raw=\"\${makedepends[*]}\"
-                  echo \"[DEBUG] Extracted makedepends: \${makedeps_raw}\"
-                fi
-                unset makedepends
+                makedeps_raw=\$(awk '/^makedepends=\\(/,/)/ {print}' PKGBUILD | sed 's/makedepends=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
+                echo \"[DEBUG] Extracted makedepends: \${makedeps_raw}\"
                 
                 # Combine both dependency lists
                 all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
