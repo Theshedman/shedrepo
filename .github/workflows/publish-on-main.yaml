@@ -75,7 +75,7 @@ jobs:
             echo "==> Building package: $pkg"
             # run build inside arch container; mount workspace and artifacts dir
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
-              --env "PKG=${PKG}" --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
+              --env "PKG=${pkg}" --env "ARCH=${ARCH}" archlinux:latest /bin/bash -lc "
               set -euo pipefail
 
               pacman -Sy --noconfirm archlinux-keyring || true
@@ -89,7 +89,7 @@ jobs:
               chown -R builder:builder /home/builder || true
 
               cd /workspace
-              sudo -u builder /workspace/scripts/build-aur.sh '${PKG}' '/workspace/${ARTIFACT_OUT}'
+              sudo -u builder /workspace/scripts/build-aur.sh \"\$PKG\" \"/workspace/${ARTIFACT_OUT}\"
             "
           done < packages/aur/manifest.txt
 
