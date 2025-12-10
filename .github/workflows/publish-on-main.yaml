@@ -95,17 +95,17 @@ jobs:
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
 
                 # clone AUR package into tmpdir (prefer canonical path)
-                BUILD_TMPDIR=$(mktemp -d /tmp/aurbuild.XXXXXX)
-                git clone --depth 1 "https://aur.archlinux.org/packages/\${PKG}.git" "${BUILD_TMPDIR}" 2>/dev/null || \
-                  git clone --depth 1 "https://aur.archlinux.org/\${PKG}.git" "${BUILD_TMPDIR}"
+                AUR_TMP_DIR=\$(mktemp -d /tmp/aurbuild.XXXXXX)
+                git clone --depth 1 \"https://aur.archlinux.org/packages/\${PKG}.git\" \"\${AUR_TMP_DIR}\" 2>/dev/null || \
+                  git clone --depth 1 \"https://aur.archlinux.org/\${PKG}.git\" \"\${AUR_TMP_DIR}\"
 
-                if [[ ! -d "${BUILD_TMPDIR}" ]]; then
-                  echo "[ERROR] Failed to clone AUR package: \${PKG}" >&2
+                if [[ ! -d \"\${AUR_TMP_DIR}\" ]]; then
+                  echo \"[ERROR] Failed to clone AUR package: \${PKG}\" >&2
                   exit 3
                 fi
 
                 # read PKGBUILD to extract makedepends (common multi-line array supported)
-                cd "${BUILD_TMPDIR}"
+                cd \"\${AUR_TMP_DIR}\"
                 makedeps_raw=$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
                 if [[ -z "${makedeps_raw// }" ]]; then
                   makedeps_raw=$(grep -oP '(?<=makedepends=\().*(?=\))' PKGBUILD 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
@@ -113,65 +113,65 @@ jobs:
 
                 # sanitize tokens: split, remove quotes/backticks, strip version constraints like >=1.24, =1.2, <2, :foo variants
                 makedeps_list=()
-                if [[ -n "${makedeps_raw// }" ]]; then
+                if [[ -n \"\${makedeps_raw// }\" ]]; then
                   # split into words safely
-                  read -ra _tokens <<< "$(echo "${makedeps_raw}" | tr '\n' ' ' | tr -s ' ' ' ')"
-                  for tok in "${_tokens[@]}"; do
+                  read -ra _tokens <<< \"\$(echo \"\${makedeps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
+                  for tok in \"\${_tokens[@]}\"; do
                     # remove surrounding quotes/backticks
-                    tok="${tok%\"}"; tok="${tok#\"}"
-                    tok="${tok%\'}"; tok="${tok#\'}"
-                    tok="${tok%\`}"; tok="${tok#\`}"
+                    tok=\"\${tok%\\\"}\"; tok=\"\${tok#\\\"}\"
+                    tok=\"\${tok%\\'}\"; tok=\"\${tok#\\'}\"
+                    tok=\"\${tok%\\`}\"; tok=\"\${tok#\\`}\"
                     # strip version comparators and everything after (>=, <=, =, <, >, :)
                     # capture leading package name: letters, numbers, dots, plus, underscore, hyphen, @
-                    sanitized=$(echo "$tok" | sed -E 's/^([A-Za-z0-9@+_.:-]+).*/\1/' | sed -E 's/([<>=:].*)$//')
+                    sanitized=\$(echo \"\$tok\" | sed -E 's/^([A-Za-z0-9@+_.:-]+).*/\\1/' | sed -E 's/([<>=:].*)$//')
                     # further strip trailing punctuation if any
-                    sanitized=$(echo "$sanitized" | sed -E 's/[^A-Za-z0-9@+_.-].*$//')
+                    sanitized=\$(echo \"\$sanitized\" | sed -E 's/[^A-Za-z0-9@+_.-].*$//')
                     # ignore empty
-                    if [[ -n "$sanitized" ]]; then
-                      makedeps_list+=("$sanitized")
+                    if [[ -n \"\$sanitized\" ]]; then
+                      makedeps_list+=(\"\$sanitized\")
                     fi
                   done
                 fi
 
                 # deduplicate
-                if [[ ${#makedeps_list[@]} -gt 0 ]]; then
+                if [[ \${#makedeps_list[@]} -gt 0 ]]; then
                   # unique-preserve order
                   declare -A seen=()
                   uniq_list=()
-                  for p in "${makedeps_list[@]}"; do
-                    if [[ -z "${seen[$p]+_}" ]]; then
-                      uniq_list+=("$p")
-                      seen[$p]=1
+                  for p in \"\${makedeps_list[@]}\"; do
+                    if [[ -z \"\${seen[\$p]+_}\" ]]; then
+                      uniq_list+=(\"\$p\")
+                      seen[\$p]=1
                     fi
                   done
-                  makedeps_list=("${uniq_list[@]}")
+                  makedeps_list=(\"\${uniq_list[@]}\")
                 fi
 
                 # install makedepends as root (non-interactive) if any
-                if [[ ${#makedeps_list[@]} -gt 0 ]]; then
-                  echo "[INFO] Installing makedepends for \${PKG}: ${makedeps_list[*]}"
-                  pacman -Sy --noconfirm --needed "${makedeps_list[@]}" || true
+                if [[ \${#makedeps_list[@]} -gt 0 ]]; then
+                  echo \"[INFO] Installing makedepends for \${PKG}: \${makedeps_list[*]}\"
+                  pacman -Sy --noconfirm --needed \"\${makedeps_list[@]}\" || true
                 else
-                  echo "[INFO] No makedepends detected for \${PKG}"
+                  echo \"[INFO] No makedepends detected for \${PKG}\"
                 fi
 
                 # IMPORTANT: cd out before moving the temp dir to avoid getcwd errors
                 cd /workspace
 
                 # move cloned source into workspace and set ownership for builder
-                BUILD_SRC_DIR="/workspace/.aur_src_\${PKG}"
-                rm -rf "${BUILD_SRC_DIR}" || true
-                mv "${BUILD_TMPDIR}" "${BUILD_SRC_DIR}"
-                chown -R builder:builder "${BUILD_SRC_DIR}"
+                BUILD_SRC_DIR=\"/workspace/.aur_src_\${PKG}\"
+                rm -rf \"\${BUILD_SRC_DIR}\" || true
+                mv \"\${AUR_TMP_DIR}\" \"\${BUILD_SRC_DIR}\"
+                chown -R builder:builder \"\${BUILD_SRC_DIR}\"
 
                 # ensure build script is executable (mounts may change perms)
                 chmod +x /workspace/scripts/build-aur.sh || true
 
                 # run the build as non-root builder using the local PKGBUILD dir
-                su -s /bin/bash builder -c "
+                su -s /bin/bash builder -c \"
                   cd /workspace
-                  /workspace/scripts/build-aur.sh '${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
-                "
+                  /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
+                \"
 
                 # done inside container
               "
@@ -231,4 +231,3 @@ jobs:
         run: |
           rclone config delete "${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}" || true
         shell: bash
-        
