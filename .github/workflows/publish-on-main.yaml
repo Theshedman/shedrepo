@@ -122,14 +122,11 @@ jobs:
                     tok=\${tok//\\\"/}
                     tok=\${tok//\\'/}
                     tok=\${tok//\\\`/}
-                    # strip version comparators and everything after (>=, <=, =, <, >, :)
-                    # capture leading package name: letters, numbers, dots, plus, underscore, hyphen, @
-                    sanitized=\$(echo \"\$tok\" | sed -E 's/^([A-Za-z0-9@+_.:-]+).*/\\\\1/' | sed -E 's/([<>=:].*)$//')
-                    # further strip trailing punctuation if any
-                    sanitized=\$(echo \"\$sanitized\" | sed -E 's/[^A-Za-z0-9@+_.-].*$//')
+                    # strip version constraints: remove everything from first <, >, =, or :
+                    tok=\${tok%%[<>=:]*}
                     # ignore empty
-                    if [[ -n \"\$sanitized\" ]]; then
-                      makedeps_list+=(\"\$sanitized\")
+                    if [[ -n \"\$tok\" ]]; then
+                      makedeps_list+=(\"\$tok\")
                     fi
                   done
                 fi
