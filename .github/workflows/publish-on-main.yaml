@@ -84,33 +84,33 @@ jobs:
                 # create builder early
                 useradd -m -s /bin/bash builder || true
                 chown -R builder:builder /workspace || true
-                
+
                 # init pacman keyring
                 pacman-key --init
                 pacman-key --populate archlinux
-                
+
                 # update & install base build deps
                 pacman -Sy --noconfirm archlinux-keyring || true
                 pacman -Syu --noconfirm || true
                 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
-                
+
                 # clone AUR package into tmpdir (prefer canonical path)
                 TMPDIR=$(mktemp -d /tmp/aurbuild.XXXXXX)
-                git clone --depth 1 "https://aur.archlinux.org/packages/${PKG}.git" "${TMPDIR}" 2>/dev/null || \
-                  git clone --depth 1 "https://aur.archlinux.org/${PKG}.git" "${TMPDIR}"
-                
+                git clone --depth 1 "https://aur.archlinux.org/packages/\${PKG}.git" "${TMPDIR}" 2>/dev/null || \
+                  git clone --depth 1 "https://aur.archlinux.org/\${PKG}.git" "${TMPDIR}"
+
                 if [[ ! -d "${TMPDIR}" ]]; then
-                  echo "[ERROR] Failed to clone AUR package: ${PKG}" >&2
+                  echo "[ERROR] Failed to clone AUR package: \${PKG}" >&2
                   exit 3
                 fi
-                
+
                 # read PKGBUILD to extract makedepends (common multi-line array supported)
                 cd "${TMPDIR}"
                 makedeps_raw=$(sed -n '/^[[:space:]]*makedepends[[:space:]]*=/{:a; N; /)/!ba; s/.*makedepends[[:space:]]*=[[:space:]]*(//; s/).*//; p}' PKGBUILD 2>/dev/null || true)
                 if [[ -z "${makedeps_raw// }" ]]; then
                   makedeps_raw=$(grep -oP '(?<=makedepends=\().*(?=\))' PKGBUILD 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
                 fi
-                
+
                 # sanitize tokens: split, remove quotes/backticks, strip version constraints like >=1.24, =1.2, <2, :foo variants
                 makedeps_list=()
                 if [[ -n "${makedeps_raw// }" ]]; then
@@ -132,7 +132,7 @@ jobs:
                     fi
                   done
                 fi
-                
+
                 # deduplicate
                 if [[ ${#makedeps_list[@]} -gt 0 ]]; then
                   # unique-preserve order
@@ -146,27 +146,27 @@ jobs:
                   done
                   makedeps_list=("${uniq_list[@]}")
                 fi
-                
+
                 # install makedepends as root (non-interactive) if any
                 if [[ ${#makedeps_list[@]} -gt 0 ]]; then
-                  echo "[INFO] Installing makedepends for ${PKG}: ${makedeps_list[*]}"
+                  echo "[INFO] Installing makedepends for \${PKG}: ${makedeps_list[*]}"
                   pacman -Sy --noconfirm --needed "${makedeps_list[@]}" || true
                 else
-                  echo "[INFO] No makedepends detected for ${PKG}"
+                  echo "[INFO] No makedepends detected for \${PKG}"
                 fi
-                
+
                 # IMPORTANT: cd out before moving the temp dir to avoid getcwd errors
                 cd /workspace
-                
+
                 # move cloned source into workspace and set ownership for builder
-                BUILD_SRC_DIR="/workspace/.aur_src_${PKG}"
+                BUILD_SRC_DIR="/workspace/.aur_src_\${PKG}"
                 rm -rf "${BUILD_SRC_DIR}" || true
                 mv "${TMPDIR}" "${BUILD_SRC_DIR}"
                 chown -R builder:builder "${BUILD_SRC_DIR}"
-                
+
                 # ensure build script is executable (mounts may change perms)
                 chmod +x /workspace/scripts/build-aur.sh || true
-                
+
                 # run the build as non-root builder using the local PKGBUILD dir
                 su -s /bin/bash builder -c "
                   cd /workspace
