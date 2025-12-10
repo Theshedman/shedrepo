@@ -1,0 +1,17 @@
+# Maintainer: You <you@example.com>
+pkgname=helloworld
+pkgver=0.1
+pkgrel=1
+pkgdesc="Simple test program for shedrepo CI"
+arch=('x86_64')
+license=('MIT')
+source=('hello.c')
+sha256sums=('SKIP') # SKIP for quick testing; replace with real checksum for production
+
+build() {
+  gcc -O2 -o hello hello.c
+}
+
+package() {
+  install -Dm755 hello "$pkgdir/usr/bin/hello"
+}

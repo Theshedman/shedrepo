@@ -1,0 +1,100 @@
+### -------------------------------------------------------------
+### shedrepo – ignore generated repo files, package builds, temp
+### -------------------------------------------------------------
+
+# Output repository artifacts
+output/
+repo/
+srv/
+tmp/
+*.log
+
+# Temporary build directory used by scripts
+/tmp/shedrepo_build*
+shedrepo_build*/
+shedrepo_build.*/
+
+# Pacman repo database files (generated)
+*.db
+*.db.tar.gz
+*.files
+*.files.tar.gz
+*.db.tar.gz.sig
+*.files.tar.gz.sig
+
+# Built packages
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+*.pkg.tar.*
+*.pkg.tar.*
+
+# Signatures
+*.sig
+
+# AUR build directories
+pkg/
+src/
+*.mtree
+*.BUILDINFO
+*.PKGINFO
+
+# AUR helper caches
+yay/
+paru/
+.pacaur/
+.cache/yay/
+.cache/paru/
+.cache/pacaur/
+.cache/aura/
+
+# Local metadata caches
+.cache/
+.cache/*
+.local/
+.local/*
+
+# Editor backups
+*~
+*.swp
+*.swo
+*.swx
+*.tmp
+
+# Debug traces from your debugging sessions
+shedrepo.add.debug
+*.debug
+
+# macOS junk
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+
+# Linux filesystem junk
+lost+found/
+
+# Node / JS (future-proofing if web docs exist)
+node_modules/
+npm-debug.log
+yarn.lock
+
+# Python (if build scripts ever expand)
+__pycache__/
+*.pyc
+
+# VSCode / JetBrains
+.vscode/
+.idea/
+
+# GitHub Actions artifact dirs
+.github/workflows/*.bak
+.github/workflows/debug/
+
+# Shell history (if someone accidentally commits)
+.bash_history
+.zsh_history
+.fish_history
+
+# Lock files
+*.lock

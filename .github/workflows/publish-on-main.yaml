@@ -1,0 +1,110 @@
+name: Publish repo (build AUR from manifest, gen DB, upload)
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ARCH: x86_64
+  REPO_OUT: output/repo
+  ARTIFACT_OUT: output/artifacts
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare paths
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}"
+          mkdir -p "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
+          ls -la packages/aur || true
+
+      - name: Import GPG private key (for signing packages if needed)
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" > /tmp/gpg_private.asc
+          gpg --batch --import /tmp/gpg_private.asc || true
+          shred -u /tmp/gpg_private.asc || rm -f /tmp/gpg_private.asc
+          gpg --list-secret-keys --keyid-format LONG
+        shell: bash
+
+      - name: Install docker (if not already present) and rclone (for upload later)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone --version
+
+      - name: Build AUR packages from manifest (serial)
+        run: |
+          set -euo pipefail
+          ART_DIR="${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
+          while IFS= read -r pkg || [ -n "$pkg" ]; do
+            pkg="$(echo "$pkg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [[ -z "$pkg" ]] && continue
+            echo "==> Building package: $pkg"
+            # run build inside arch container; mount workspace and artifacts dir
+            docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" archlinux:latest /bin/bash -lc "
+              set -euo pipefail
+              pacman -Sy --noconfirm --needed
+              pacman -S --noconfirm --needed git base-devel makepkg pacman-contrib gnupg curl
+              /workspace/scripts/build-aur.sh '${pkg}' '/workspace/${ARTIFACT_OUT}'
+            "
+          done < packages/aur/manifest.txt
+
+      - name: Show artifacts
+        run: |
+          echo "Artifacts dir listing:"
+          find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -maxdepth 3 -ls || true
+
+      - name: Move artifacts into repo output dir
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}"
+          # copy all .pkg.* and optional .sig into repo arch dir
+          find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \;
+          find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -type f -name '*.pkg.*.sig' -exec cp -v {} "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" \; || true
+          ls -la "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}" || true
+
+      - name: Ensure shedrepo scripts executable
+        run: chmod +x shedrepo/shedrepo/commands/*.sh
+
+      - name: Set REPO_ROOT env for gen_db
+        run: |
+          echo "REPO_ROOT=${GITHUB_WORKSPACE}/${REPO_OUT}" >> $GITHUB_ENV
+          echo "ARCH=${ARCH}" >> $GITHUB_ENV
+
+      - name: Regenerate DB (gen_db.sh)
+        run: |
+          ./shedrepo/shedrepo/commands/gen_db.sh
+
+      - name: Configure rclone remote for R2
+        run: |
+          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}"
+          R2_ENDPOINT="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          rclone config create "${RCLONE_REMOTE}" s3 \
+            env_auth false \
+            access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}" \
+            secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+            endpoint "${R2_ENDPOINT}" \
+            region auto
+          echo "rclone remote '${RCLONE_REMOTE}' configured"
+
+      - name: Upload repo to R2
+        run: |
+          RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}"
+          TARGET="${RCLONE_REMOTE}:${{ secrets.R2_BUCKET }}/${ARCH}/"
+          rclone sync --progress --create-empty-src-dirs --delete-after "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" "${TARGET}"
+          echo "Upload finished."
+
+      - name: Cleanup rclone remote
+        if: always()
+        run: rclone config delete "${{ secrets.RCLONE_REMOTE_NAME || 'r2' }}" || true

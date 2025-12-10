@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# -----------------------------------------------------------------------------
+# ./bin/shedrepo - CLI wrapper (delegates to shedrepo command scripts)
+# - Reuses ./shedrepo/config.sh and ./shedrepo/utils.sh (no duplication)
+# - Usage: ./bin/shedrepo [GLOBAL-OPTIONS] <command> [args...]
+# -----------------------------------------------------------------------------
+
+# -------------------------
+# Basic helpers
+# -------------------------
+realpath_safe() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1"
+  else
+    # fallback: canonicalize without resolving symlinks fully
+    pushd "$(cd "$(dirname "$1")" >/dev/null 2>&1 && pwd)" >/dev/null 2>&1 || return 1
+    printf "%s/%s" "$(pwd -P)" "$(basename "$1")"
+    popd >/dev/null 2>&1 || true
+  fi
+}
+
+# -------------------------
+# Discover script locations
+# -------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_BASE_DIR="$(realpath_safe "$SCRIPT_DIR/../shedrepo")"
+CONFIG_SH="$REPO_BASE_DIR/config.sh"
+UTILS_SH="$REPO_BASE_DIR/utils.sh"
+CMD_DIR="$(realpath_safe "$REPO_BASE_DIR/commands")"
+
+# -------------------------
+# Source central config + utils (fatal if missing)
+# -------------------------
+if [[ -f "$CONFIG_SH" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_SH"
+else
+  printf '[%s] [ERROR] Missing config.sh at %s\n' "$(date -Iseconds)" "$CONFIG_SH" >&2
+  exit 1
+fi
+
+if [[ -f "$UTILS_SH" ]]; then
+  # shellcheck disable=SC1090
+  source "$UTILS_SH"
+else
+  printf '[%s] [ERROR] Missing utils.sh at %s\n' "$(date -Iseconds)" "$UTILS_SH" >&2
+  exit 1
+fi
+
+# Ensure some fallback defaults if config.sh didn't provide them
+: "${REPO_ROOT:=${REPO_ROOT:-./output/repo}}"
+: "${ARCH:=${ARCH:-$(uname -m)}}"
+: "${SIGN_KEY:=${SIGN_KEY:-shedos-key}}"
+: "${R2_BUCKET:=${R2_BUCKET:-shedos-repo}}"
+: "${TMP_BUILD_DIR:=${TMP_BUILD_DIR:-/tmp/shedrepo_build}}"
+
+# Export key envs relied on by command scripts
+export REPO_ROOT ARCH SIGN_KEY TMP_BUILD_DIR R2_BUCKET
+
+# -------------------------
+# Validate commands dir
+# -------------------------
+if [[ ! -d "$CMD_DIR" ]]; then
+  die "Commands directory not found: $CMD_DIR"
+fi
+
+# -------------------------
+# Parse global flags (stop at first non-flag token)
+# -------------------------
+NO_SIGN=false
+DEBUG=false
+
+_parse_globals_done=false
+while [[ $# -gt 0 && $_parse_globals_done == false ]]; do
+  case "$1" in
+  --repo-root)
+    shift
+    [[ -z "${1:-}" ]] && die "--repo-root requires a path"
+    REPO_ROOT="$1"
+    shift
+    REPO_ROOT="$(realpath_safe "$REPO_ROOT")"
+    export REPO_ROOT
+    ;;
+  --arch)
+    shift
+    [[ -z "${1:-}" ]] && die "--arch requires a value"
+    ARCH="$1"
+    shift
+    export ARCH
+    ;;
+  --sign-key | --signkey | --key)
+    shift
+    [[ -z "${1:-}" ]] && die "--sign-key requires a value"
+    SIGN_KEY="$1"
+    shift
+    export SIGN_KEY
+    ;;
+  --no-sign)
+    NO_SIGN=true
+    shift
+    export NO_SIGN
+    ;;
+  --tmp-build-dir)
+    shift
+    [[ -z "${1:-}" ]] && die "--tmp-build-dir requires a path"
+    TMP_BUILD_DIR="$1"
+    shift
+    TMP_BUILD_DIR="$(realpath_safe "$TMP_BUILD_DIR")"
+    export TMP_BUILD_DIR
+    ;;
+  --debug)
+    DEBUG=true
+    shift
+    ;;
+  --help | -h)
+    # leave to usage; break to dispatch
+    break
+    ;;
+  --)
+    shift
+    _parse_globals_done=true
+    break
+    ;;
+  -*)
+    # unknown global option => assume end of globals (pass through)
+    _parse_globals_done=true
+    break
+    ;;
+  *)
+    _parse_globals_done=true
+    break
+    ;;
+  esac
+done
+
+# -------------------------
+# Helper: run a command script from shedrepo/commands
+# -------------------------
+run_cmd_script() {
+  local script_name="$1"
+  shift
+  local script_path="$CMD_DIR/$script_name"
+  if [[ ! -x "$script_path" ]]; then
+    die "Command script not executable or missing: $script_path"
+  fi
+  export NO_SIGN
+  if [[ "$DEBUG" == "true" ]]; then
+    log "Running: $script_path $*"
+    bash -x "$script_path" "$@"
+  else
+    "$script_path" "$@"
+  fi
+}
+
+# -------------------------
+# Usage
+# -------------------------
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [GLOBAL OPTIONS] <command> [args...]
+
+Global options:
+  --repo-root <path>      Override repository root (default: $REPO_ROOT)
+  --arch <arch>           Set architecture (default: $ARCH)
+  --sign-key <key>        GPG key id/fingerprint to use (default: $SIGN_KEY)
+  --no-sign               Do not sign packages or DB (exported as NO_SIGN)
+  --tmp-build-dir <path>  Temp build dir (default: $TMP_BUILD_DIR)
+  --debug                 Enable debug (set -x for delegated scripts)
+  --help                  Show this help
+
+Commands (delegated to shedrepo/commands/*.sh):
+  add <pkgdir|pkgfile>      Build or copy package into repo
+  update <pkgdir|pkgfile>   Rebuild/update a package (wrapper)
+  remove <pkgname> [opts]   Remove package files by package name
+  gen-db                    Regenerate and sign repository DB
+  list [--verbose]          List packages in the repo
+  clean [--keep N] [--dry-run]
+  upload [--dry-run] [--remote <rclone-remote>]
+
+Examples:
+  $(basename "$0") --repo-root /srv/shedos add packages/helloworld
+  $(basename "$0") --no-sign gen-db
+EOF
+}
+
+# -------------------------
+# Subcommand wrappers
+# -------------------------
+cmd_add() {
+  [[ $# -lt 1 ]] && die "add requires a package directory or package file"
+  local target="$1"
+  shift
+  log "[ADD] target=$target"
+  run_cmd_script "add.sh" "$target"
+}
+
+cmd_update() {
+  [[ $# -lt 1 ]] && die "update requires a package directory or package file"
+  local target="$1"
+  shift
+  log "[UPDATE] target=$target"
+  run_cmd_script "update.sh" "$target" "$@"
+}
+
+cmd_remove() {
+  [[ $# -lt 1 ]] && die "remove requires a package name"
+  local pkg="$1"
+  shift
+  log "[REMOVE] pkg=$pkg"
+  run_cmd_script "remove.sh" "$pkg" "$@"
+}
+
+cmd_gen_db() {
+  log "[GEN-DB] Regenerating DB for: $REPO_ROOT/$ARCH"
+  run_cmd_script "gen_db.sh" "$@"
+}
+
+cmd_list() {
+  run_cmd_script "list.sh" "$@"
+}
+
+cmd_clean() {
+  run_cmd_script "clean.sh" "$@"
+}
+
+cmd_upload() {
+  run_cmd_script "upload.sh" "$@"
+}
+
+# -------------------------
+# Main dispatch
+# -------------------------
+main() {
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  local cmd="$1"
+  shift
+  case "$cmd" in
+  add) cmd_add "$@" ;;
+  update) cmd_update "$@" ;;
+  remove) cmd_remove "$@" ;;
+  gen-db) cmd_gen_db "$@" ;;
+  list) cmd_list "$@" ;;
+  clean) cmd_clean "$@" ;;
+  upload) cmd_upload "$@" ;;
+  help | -h | --help)
+    usage
+    exit 0
+    ;;
+  *) die "Unknown command: $cmd" ;;
+  esac
+}
+
+# Run main with all remaining args
+main "$@"

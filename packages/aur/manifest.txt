@@ -1,0 +1,17 @@
+yay-bin
+walker
+hadolint-bin
+auto-cpufreq
+mise-bin
+google-chrome
+visual-studio-code-bin
+slack-desktop
+lazydocker
+minikube-bin
+impala
+bluetui
+postman-bin
+spotify
+looking-glass
+ttf-ms-fonts
+oh-my-zsh-git
