@@ -2,81 +2,96 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Allow makepkg to run as root in CI (not recommended on real hosts, but OK for CI)
-if [[ "$(id -u)" -eq 0 ]]; then
-  export MAKEPKG_ALLOW_ROOT=1
-  CI_BUILD_AS_ROOT=true
-else
-  CI_BUILD_AS_ROOT=false
-fi
+# usage: build-aur.sh <aur-package-or-local-dir> <artifact-output-dir>
+# - If first arg is a directory containing a PKGBUILD, that directory is used.
+# - Otherwise it's treated as an AUR package name and cloned from https://aur.archlinux.org/<pkg>.git
 
-# scripts/build-aur.sh <pkgname> <artifacts_dir>
-# This script is intended to run INSIDE an archlinux:latest container as root,
-# and will build as a non-root 'builder' user to run makepkg safely.
-pkgname="$1"
-artifacts_dir="$2"
+PKG_ARG="${1:-}"
+ART_OUT="${2:-}"
 
-if [[ -z "$pkgname" || -z "$artifacts_dir" ]]; then
-  echo "Usage: $0 <pkgname> <artifacts_dir>"
+if [[ -z "$PKG_ARG" || -z "$ART_OUT" ]]; then
+  cat <<EOF >&2
+Usage: $0 <aur-package-name | path-to-pkgdir> <artifact-output-dir>
+Example:
+  $0 yay-bin /workspace/output/artifacts
+EOF
   exit 2
 fi
 
-# Prepare builder user and environment
-useradd -m -G users,wheel builder || true
-passwd -l builder >/dev/null 2>&1 || true
-export HOME_BUILDER="/home/builder"
-mkdir -p "$HOME_BUILDER"
-chown -R builder:builder "$HOME_BUILDER"
+# Prepare artifact dir (host-mounted path; expand if relative)
+mkdir -p "$ART_OUT"
 
-# ensure GNUPG home exists for builder (CI should have imported key into runner gpg)
-sudo -u builder mkdir -p "$HOME_BUILDER/.gnupg"
-sudo -u builder chmod 700 "$HOME_BUILDER/.gnupg"
-
-# Update and install required packages (non-interactive)
-pacman -Sy --noconfirm --needed
-pacman -S --noconfirm --needed git base-devel makepkg pacman-contrib gnupg curl
-
-# Clone AUR repo
-cd "$HOME_BUILDER"
-if ! sudo -u builder git clone "https://aur.archlinux.org/${pkgname}.git"; then
-  echo "ERROR: failed to clone AUR repo for ${pkgname}"
-  exit 3
+# Detect root and enable makepkg root mode in CI
+if [[ "$(id -u)" -eq 0 ]]; then
+  export MAKEPKG_ALLOW_ROOT=1
+  CI_ROOT_BUILD=true
+else
+  CI_ROOT_BUILD=false
 fi
 
-cd "${pkgname}"
+# Create isolated build dir
+BUILD_ROOT="$(mktemp -d --tmpdir build-aur.XXXXXX)"
+trap 'rc=$?; rm -rf -- "$BUILD_ROOT"; exit $rc' EXIT
 
-# If user provided a prebuild hook inside repo (not expected), run it:
-if [[ -x ./prebuild.sh ]]; then
-  echo "Running prebuild hook for ${pkgname}"
-  sudo -u builder ./prebuild.sh
+# Determine the package source
+if [[ -d "$PKG_ARG" && -f "$PKG_ARG/PKGBUILD" ]]; then
+  echo "[INFO] Using local PKGBUILD directory: $PKG_ARG"
+  cp -a -- "$PKG_ARG/"* "$BUILD_ROOT/"
+else
+  # Treat as AUR package name: clone
+  PKG_NAME="$PKG_ARG"
+  echo "[INFO] Cloning AUR package: $PKG_NAME"
+  # Attempt to clone via HTTPS; fallback if needed
+  git clone --depth 1 "https://aur.archlinux.org/${PKG_NAME}.git" "$BUILD_ROOT" || {
+    echo "[ERROR] Failed to clone AUR package: ${PKG_NAME}" >&2
+    exit 3
+  }
 fi
 
-# Build package as builder
-sudo -u builder bash -lc 'makepkg --syncdeps --noconfirm --clean --noprogressbar' || {
-  echo "makepkg failed for ${pkgname}"
+cd "$BUILD_ROOT"
+
+# sanity: PKGBUILD must exist
+if [[ ! -f PKGBUILD ]]; then
+  echo "[ERROR] No PKGBUILD found in build dir: $BUILD_ROOT" >&2
   exit 4
+fi
+
+# Ensure pacman keyring and base-devel should be installed by container bootstrap step.
+# We still check for makepkg and fail early with helpful message if missing.
+if ! command -v makepkg >/dev/null 2>&1; then
+  echo "[ERROR] makepkg not found; ensure base-devel is installed in the container." >&2
+  exit 5
+fi
+
+# Run makepkg (noninteractive)
+# Note: in CI we allow root builds via MAKEPKG_ALLOW_ROOT; makepkg will still use fakeroot to build .BUILDINFO
+# We will not skip signing here — signing is handled separately if you import GPG key in the job.
+echo "[INFO] Running makepkg for: $(pwd)"
+# Use --syncdeps to fetch deps in container; container step should have pacman prepared, but keep this for safety.
+# Use --noconfirm and --clean to avoid prompts and cleanup.
+makepkg --syncdeps --noconfirm --clean --noprogressbar || {
+  echo "[ERROR] makepkg failed for package in $(pwd)" >&2
+  exit 6
 }
 
-# Collect produced package files (.pkg.*) and signatures
-mkdir -p -- "$artifacts_dir/$pkgname"
-for f in ./*.pkg.*; do
-  [ -f "$f" ] || continue
-  cp -av -- "$f" "$artifacts_dir/$pkgname/"
-done
-
-# Copy signature files produced beside pkgs (if any)
-for s in ./*.pkg.*.sig; do
-  [ -f "$s" ] || continue
-  cp -av -- "$s" "$artifacts_dir/$pkgname/"
-done
-
-# optional postbuild hook
-if [[ -x ./postbuild.sh ]]; then
-  echo "Running postbuild hook for ${pkgname}"
-  sudo -u builder ./postbuild.sh "$artifacts_dir/$pkgname"
+# Find produced package file(s)
+pkgfile="$(ls -1t -- *.pkg.* 2>/dev/null | head -n1 || true)"
+if [[ -z "$pkgfile" ]]; then
+  echo "[ERROR] No package file produced by makepkg in $(pwd)" >&2
+  exit 7
 fi
 
-# Fix ownership so runner can read artifacts
-chown -R "$(id -u):$(id -g)" "$artifacts_dir/$pkgname" || true
+# Copy package and signature (if any) to artifact dir
+echo "[INFO] Copying package to artifacts: $pkgfile -> $ART_OUT"
+cp --preserve=mode,ownership,timestamps -- "$pkgfile" "$ART_OUT/"
 
-echo "Built ${pkgname} -> ${artifacts_dir}/${pkgname}"
+if [[ -f "${pkgfile}.sig" ]]; then
+  cp --preserve=mode,ownership,timestamps -- "${pkgfile}.sig" "$ART_OUT/"
+fi
+
+# Optional: print final listing for visibility
+echo "[INFO] Artifacts in $ART_OUT:"
+ls -la "$ART_OUT" || true
+
+# Exit success
+exit 0
