@@ -10,7 +10,6 @@ minikube-bin
 impala
 bluetui
 postman-bin
-spotify
 looking-glass
 ttf-ms-fonts
 oh-my-zsh-git
