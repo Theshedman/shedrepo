@@ -1,5 +1,4 @@
 yay
-walker
 hadolint-bin
 auto-cpufreq
 mise-bin
