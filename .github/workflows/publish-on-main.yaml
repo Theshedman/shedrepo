@@ -245,8 +245,10 @@ jobs:
                 chmod +x /workspace/scripts/build-aur.sh || true
 
                 # run the build as non-root builder using the local PKGBUILD dir
+                # Pass MAKEPKG_OPTS to skip GPG checks (many AUR packages have GPG issues)
                 su -s /bin/bash builder -c \"
                   cd /workspace
+                  export MAKEPKG_OPTS='--skippgpcheck'
                   /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
                 \"
 
