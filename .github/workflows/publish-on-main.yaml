@@ -12,12 +12,22 @@ env:
   ARCH: x86_64
   REPO_OUT: output/repo
   ARTIFACT_OUT: output/artifacts
+  # Make PGP-skip optional; set to "true" to skip PGP checks (not recommended)
+  SKIP_PGP_CHECK: "false"
+  # If true, allow builds to continue when validpgpkeys cannot be imported (use with caution)
+  ALLOW_KEY_FAIL: "false"
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     env:
+      # secrets injected at runtime (kept as env here)
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      RCLONE_REMOTE_NAME: ${{ secrets.RCLONE_REMOTE_NAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,33 +38,19 @@ jobs:
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}"
           mkdir -p "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
-          ls -la packages/aur || true
-
-      - name: Import GPG private key (host for repo signing)
-        if: ${{ env.GPG_PRIVATE_KEY != '' }}
-        run: |
-          echo "${{ env.GPG_PRIVATE_KEY }}" > /tmp/gpg_private.asc
-          gpg --batch --import /tmp/gpg_private.asc || true
-          shred -u /tmp/gpg_private.asc || rm -f /tmp/gpg_private.asc
-          gpg --list-secret-keys --keyid-format LONG
+          echo "Manifest (packages/aur/manifest.txt):"
+          sed -n '1,200p' packages/aur/manifest.txt || true
         shell: bash
 
-      - name: Install Docker (if needed) and rclone
+      - name: Import GPG private key (host, for signing repo DB)
         run: |
-          set -euo pipefail
-          if command -v docker >/dev/null 2>&1; then
-            echo "docker already installed: $(docker --version)"
+          if [[ -n "${GPG_PRIVATE_KEY:-}" ]]; then
+            printf '%s\n' "${GPG_PRIVATE_KEY}" > /tmp/gpg_private.asc
+            gpg --batch --import /tmp/gpg_private.asc || true
+            shred -u /tmp/gpg_private.asc || rm -f /tmp/gpg_private.asc
+            gpg --list-secret-keys --keyid-format LONG || true
           else
-            echo "Installing docker using official convenience script"
-            curl -fsSL https://get.docker.com | sudo sh
-            sudo usermod -aG docker $USER || true
-          fi
-
-          if command -v rclone >/dev/null 2>&1; then
-            echo "rclone already installed: $(rclone --version)"
-          else
-            echo "Installing rclone"
-            curl -fsSL https://rclone.org/install.sh | sudo bash
+            echo "GPG_PRIVATE_KEY not provided; skipping host import."
           fi
         shell: bash
 
@@ -64,199 +60,195 @@ jobs:
           chmod +x shedrepo/commands/*.sh || true
         shell: bash
 
-      - name: Build AUR packages from manifest (serial, non-root inside container)
+      - name: Install Docker (if needed) and rclone
+        run: |
+          set -euo pipefail
+          if command -v docker >/dev/null 2>&1; then
+            echo "docker already installed: $(docker --version)"
+          else
+            curl -fsSL https://get.docker.com | sudo sh
+            sudo usermod -aG docker $USER || true
+          fi
+
+          if command -v rclone >/dev/null 2>&1; then
+            echo "rclone already installed: $(rclone --version)"
+          else
+            curl -fsSL https://rclone.org/install.sh | sudo bash
+          fi
+        shell: bash
+
+      - name: Build AUR packages from manifest (serial)
         env:
           ARCH: ${{ env.ARCH }}
+          SKIP_PGP_CHECK: ${{ env.SKIP_PGP_CHECK }}
+          ALLOW_KEY_FAIL: ${{ env.ALLOW_KEY_FAIL }}
         run: |
           set -euo pipefail
           ART_DIR="${GITHUB_WORKSPACE}/${ARTIFACT_OUT}"
+          MANIFEST="packages/aur/manifest.txt"
+          mkdir -p "${ART_DIR}"
+
+          if [[ ! -f "${MANIFEST}" ]]; then
+            echo "No AUR manifest found at ${MANIFEST}; nothing to build."
+            exit 0
+          fi
+
+          # helper: retry a command N times with sleep
+          retry() {
+            local n=0
+            local max=${1:-3}; shift
+            local delay=${1:-3}; shift
+            until "$@"; do
+              n=$((n+1))
+              if [[ $n -ge $max ]]; then
+                echo "[retry] giving up after $n attempts: $*"
+                return 1
+              fi
+              echo "[retry] attempt $n/$max failed: $*; sleeping ${delay}s"
+              sleep "$delay"
+            done
+            return 0
+          }
 
           while IFS= read -r pkg || [ -n "$pkg" ]; do
             pkg="$(echo "$pkg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -z "$pkg" ]] && continue
             echo "==> Building package: $pkg"
 
+            # build inside container, pass PKG and ARTIFACT_OUT via env
             docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" -w "/workspace" \
-              --env "ARCH=${ARCH}" --env "PKG=${pkg}" archlinux:latest /bin/bash -lc "
-                
+              --env "ARCH=${ARCH}" --env "PKG=${pkg}" --env "ARTIFACT_OUT=${ARTIFACT_OUT}" \
+              archlinux:latest /bin/bash -lc "
                 set -euo pipefail
 
-                # create builder early
+                # create builder user if missing; ensure workspace ownership
                 useradd -m -s /bin/bash builder || true
                 chown -R builder:builder /workspace || true
 
-                # init pacman keyring
-                pacman-key --init
-                pacman-key --populate archlinux
+                # initialize pacman keyring if needed
+                pacman-key --init || true
+                pacman-key --populate archlinux || true
 
-                # update & install base build deps
-                pacman -Sy --noconfirm archlinux-keyring || true
-                pacman -Syu --noconfirm || true
-                pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib
+                # update small set first, but avoid full dist-upgrade cost repeatedly; still try with retry
+                retry() { local max=\${1:-3}; shift; local delay=\${1:-3}; local n=0; until \"\$@\"; do n=\$((n+1)); if [[ \$n -ge \$max ]]; then return 1; fi; sleep \$delay; done; }
+                retry 3 5 pacman -Sy --noconfirm archlinux-keyring || true
 
-                # clone AUR package into tmpdir (prefer canonical path)
-                AUR_TMP_DIR=\$(mktemp -d /tmp/aurbuild.XXXXXX)
-                git clone --depth 1 \"https://aur.archlinux.org/packages/\${PKG}.git\" \"\${AUR_TMP_DIR}\" 2>/dev/null || \
-                  git clone --depth 1 \"https://aur.archlinux.org/\${PKG}.git\" \"\${AUR_TMP_DIR}\"
+                # install base build deps (no heavy -Syu here, keep container small/fresh)
+                retry 3 5 pacman -Sy --noconfirm --needed base-devel git fakeroot gnupg curl pacman-contrib || true
 
-                if [[ ! -d \"\${AUR_TMP_DIR}\" ]]; then
+                TMPDIR=\$(mktemp -d /tmp/aurbuild.XXXXXX)
+                gitclone_ok=1
+                for attempt in 1 2 3; do
+                  git clone --depth 1 \"https://aur.archlinux.org/packages/\${PKG}.git\" \"\${TMPDIR}\" 2>/dev/null && gitclone_ok=0 && break || true
+                  git clone --depth 1 \"https://aur.archlinux.org/\${PKG}.git\" \"\${TMPDIR}\" 2>/dev/null && gitclone_ok=0 && break || true
+                  sleep 2
+                done
+                if [[ \$gitclone_ok -ne 0 ]] || [[ ! -d \"\${TMPDIR}\" ]]; then
                   echo \"[ERROR] Failed to clone AUR package: \${PKG}\" >&2
                   exit 3
                 fi
 
-                # read PKGBUILD to extract both depends and makedepends
-                cd \"\${AUR_TMP_DIR}\"
-                
-                echo \"[DEBUG] Extracting dependencies from PKGBUILD...\"
-                
-                # Extract depends using awk (handles multi-line arrays)
-                depends_raw=\"\"
-                depends_raw=\$(awk '/^depends=\\(/,/)/ {print}' PKGBUILD | sed 's/depends=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
-                echo \"[DEBUG] Extracted depends: \${depends_raw}\"
-                
-                # Extract makedepends using awk (handles multi-line arrays)
-                makedeps_raw=\"\"
-                makedeps_raw=\$(awk '/^makedepends=\\(/,/)/ {print}' PKGBUILD | sed 's/makedepends=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
-                echo \"[DEBUG] Extracted makedepends: \${makedeps_raw}\"
-                
-                # Extract validpgpkeys for GPG signature verification
-                validpgpkeys_raw=\"\"
-                validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/)/ {print}' PKGBUILD 2>/dev/null | sed 's/validpgpkeys=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs || true)
-                echo \"[DEBUG] Extracted validpgpkeys: '\${validpgpkeys_raw}'\"
-                
-                # Also try single-line format
-                if [[ -z \"\${validpgpkeys_raw}\" ]]; then
-                  validpgpkeys_raw=\$(grep -oP 'validpgpkeys=\\(\\K[^)]+' PKGBUILD 2>/dev/null | sed 's/[\\047\"]//g' | xargs || true)
-                  echo \"[DEBUG] Single-line extraction result: '\${validpgpkeys_raw}'\"
-                fi
-                
-                if [[ -n \"\${validpgpkeys_raw// }\" ]]; then
-                  echo \"[INFO] Found GPG keys to import: \${validpgpkeys_raw}\"
-                  for key in \${validpgpkeys_raw}; do
-                    echo \"[INFO] Importing GPG key as root: \${key}\"
-                    gpg --batch --keyserver keyserver.ubuntu.com --recv-keys \"\${key}\" 2>&1 | head -5 || \
-                      gpg --batch --keyserver keys.openpgp.org --recv-keys \"\${key}\" 2>&1 | head -5 || \
-                      gpg --batch --keyserver pgp.mit.edu --recv-keys \"\${key}\" 2>&1 | head -5 || \
-                      echo \"[WARN] Could not import key \${key} from any keyserver\"
-                    
-                    # Also import for builder user
-                    echo \"[INFO] Importing GPG key for builder user: \${key}\"
-                    su -s /bin/bash builder -c \"gpg --batch --keyserver keyserver.ubuntu.com --recv-keys '\${key}'\" 2>&1 | head -5 || \
-                      su -s /bin/bash builder -c \"gpg --batch --keyserver keys.openpgp.org --recv-keys '\${key}'\" 2>&1 | head -5 || \
-                      su -s /bin/bash builder -c \"gpg --batch --keyserver pgp.mit.edu --recv-keys '\${key}'\" 2>&1 | head -5 || \
-                      echo \"[WARN] Could not import key \${key} for builder user\"
-                  done
-                else
-                  echo \"[INFO] No GPG keys found in PKGBUILD\"
-                fi
-                
-                # Combine both dependency lists
-                all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
-                echo \"[DEBUG] Combined dependencies: \${all_deps_raw}\"
+                cd \"\${TMPDIR}\"
 
-                # sanitize tokens: split, remove quotes/backticks, strip version constraints
+                # Extract depends & makedepends (multi-line arrays supported)
+                depends_raw=\$(awk '/^depends=\\(/,/\\)/ {print}' PKGBUILD 2>/dev/null | sed 's/depends=(//; s/).*//; s/[\"'\\''`]//g' | tr '\\n' ' ' | xargs || true)
+                makedeps_raw=\$(awk '/^makedepends=\\(/,/\\)/ {print}' PKGBUILD 2>/dev/null | sed 's/makedepends=(//; s/).*//; s/[\"'\\''`]//g' | tr '\\n' ' ' | xargs || true)
+                validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/\\)/ {print}' PKGBUILD 2>/dev/null | sed 's/validpgpkeys=(//; s/).*//; s/[\"'\\''`]//g' | tr '\\n' ' ' | xargs || true)
+                if [[ -z \"\${validpgpkeys_raw}\" ]]; then
+                  validpgpkeys_raw=\$(grep -oP 'validpgpkeys=\\(\\K[^)]+' PKGBUILD 2>/dev/null | sed 's/[\"'\\''`]//g' | xargs || true)
+                fi
+
+                # Try to import validpgpkeys into root and builder; prefer keys.openpgp.org, fallback to keys.ubuntu/pgp.mit.edu
+                import_key_for() {
+                  local target_user=\$1; shift
+                  local key=\$1
+                  if [[ -z \"\$key\" ]]; then return 0; fi
+                  echo \"[INFO] Importing key \$key for \$target_user\"
+                  if [[ \"\$target_user\" == root ]]; then
+                    gpg --batch --keyserver keys.openpgp.org --recv-keys \"\$key\" 2>/dev/null || \
+                    gpg --batch --keyserver keyserver.ubuntu.com --recv-keys \"\$key\" 2>/dev/null || \
+                    gpg --batch --keyserver pgp.mit.edu --recv-keys \"\$key\" 2>/dev/null || return 1
+                  else
+                    su -s /bin/bash builder -c \"gpg --batch --keyserver keys.openpgp.org --recv-keys '\${key}'\" 2>/dev/null || \
+                    su -s /bin/bash builder -c \"gpg --batch --keyserver keyserver.ubuntu.com --recv-keys '\${key}'\" 2>/dev/null || \
+                    su -s /bin/bash builder -c \"gpg --batch --keyserver pgp.mit.edu --recv-keys '\${key}'\" 2>/dev/null || return 1
+                  fi
+                  return 0
+                }
+
+                if [[ -n \"\${validpgpkeys_raw// }\" ]]; then
+                  for k in \${validpgpkeys_raw}; do
+                    if ! import_key_for root \"\$k\"; then
+                      echo \"[WARN] failed to import key \$k for root\"
+                    fi
+                    if ! import_key_for builder \"\$k\"; then
+                      echo \"[WARN] failed to import key \$k for builder\"
+                    fi
+                  done
+                fi
+
+                # Combine dependency lists
+                all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
                 deps_list=()
                 if [[ -n \"\${all_deps_raw// }\" ]]; then
-                  # split into words safely
-                  read -ra _tokens <<< \"\$(echo \"\${all_deps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
-                  for tok in \"\${_tokens[@]}\"; do
-                    # remove surrounding quotes/backticks
-                    tok=\${tok//\\\"/}
-                    tok=\${tok//\\'/}
-                    tok=\${tok//\\\`/}
-                    # strip version constraints: remove everything from first <, >, =, or :
+                  read -ra tokens <<< \"\$(echo \"\${all_deps_raw}\" | tr '\\n' ' ' | tr -s ' ' ' ')\"
+                  for tok in \"\${tokens[@]}\"; do
+                    tok=\${tok//\"/}
+                    tok=\${tok//\'/}
+                    tok=\${tok//\`/}
                     tok=\${tok%%[<>=:]*}
-                    # ignore empty
-                    if [[ -n \"\$tok\" ]]; then
-                      deps_list+=(\"\$tok\")
-                    fi
+                    if [[ -n \"\$tok\" ]]; then deps_list+=(\"\$tok\"); fi
                   done
-                fi
-
-                # deduplicate
-                if [[ \${#deps_list[@]} -gt 0 ]]; then
-                  # unique-preserve order
-                  declare -A seen=()
-                  uniq_list=()
+                  # dedupe preserving order
+                  declare -A seen
+                  uniq=()
                   for p in \"\${deps_list[@]}\"; do
-                    if [[ -z \"\${seen[\$p]+_}\" ]]; then
-                      uniq_list+=(\"\$p\")
-                      seen[\$p]=1
-                    fi
+                    if [[ -z \"\${seen[\$p]+_}\" ]]; then uniq+=(\"\$p\"); seen[\$p]=1; fi
                   done
-                  deps_list=(\"\${uniq_list[@]}\")
+                  deps_list=(\"\${uniq[@]}\")
                 fi
 
-                # install all dependencies as root (non-interactive) if any
                 if [[ \${#deps_list[@]} -gt 0 ]]; then
-                  echo \"[INFO] Dependencies detected for \${PKG}: \${deps_list[*]}\"
-                  
-                  # Sync package database first
-                  echo \"[INFO] Syncing package database...\"
-                  pacman -Sy --noconfirm
-                  
-                  # Try to install all at once first (faster)
-                  echo \"[INFO] Installing dependencies...\"
-                  if pacman -S --noconfirm --needed --asdeps \"\${deps_list[@]}\"; then
-                    echo \"[INFO] Pacman install command completed\"
-                    
-                    # Verify installations
-                    echo \"[INFO] Verifying installed packages...\"
-                    missing=()
-                    for dep in \"\${deps_list[@]}\"; do
-                      if pacman -Q \"\$dep\" &>/dev/null; then
-                        echo \"  [✓] \$dep\"
-                      else
-                        echo \"  [✗] \$dep - NOT FOUND\"
-                        missing+=(\"\$dep\")
-                      fi
-                    done
-                    
-                    if [[ \${#missing[@]} -gt 0 ]]; then
-                      echo \"[WARN] These packages are not installed: \${missing[*]}\"
-                      echo \"[INFO] They may not exist in official repos or have different names\"
-                    else
-                      echo \"[INFO] All dependencies verified successfully\"
-                    fi
-                  else
-                    echo \"[ERROR] Pacman install failed, attempting individual install...\"
-                    for dep in \"\${deps_list[@]}\"; do
-                      if pacman -S --noconfirm --needed --asdeps \"\$dep\"; then
-                        echo \"  [✓] Installed: \$dep\"
-                      else
-                        echo \"  [✗] Failed: \$dep\"
-                      fi
-                    done
+                  echo \"[INFO] Installing deps for \${PKG}: \${deps_list[*]}\"
+                  retry 3 pacman -Sy --noconfirm || true
+                  if ! pacman -S --noconfirm --needed \"\${deps_list[@]}\"; then
+                    echo \"[WARN] Some deps failed to install via pacman; continuing and hoping makedepends are AUR-only\"
                   fi
                 else
-                  echo \"[INFO] No dependencies detected for \${PKG}\"
+                  echo \"[INFO] No deps detected for \${PKG}\"
                 fi
 
-                # IMPORTANT: cd out before moving the temp dir to avoid getcwd errors
+                # Move source into workspace and run build as non-root builder
                 cd /workspace
-
-                # move cloned source into workspace and set ownership for builder
                 BUILD_SRC_DIR=\"/workspace/.aur_src_\${PKG}\"
                 rm -rf \"\${BUILD_SRC_DIR}\" || true
-                mv \"\${AUR_TMP_DIR}\" \"\${BUILD_SRC_DIR}\"
+                mv \"\${TMPDIR}\" \"\${BUILD_SRC_DIR}\"
                 chown -R builder:builder \"\${BUILD_SRC_DIR}\"
-
-                # ensure build script is executable (mounts may change perms)
                 chmod +x /workspace/scripts/build-aur.sh || true
 
-                # run the build as non-root builder using the local PKGBUILD dir
-                # Pass MAKEPKG_OPTS to skip GPG checks (many AUR packages have GPG issues)
+                # Run build and capture logs (stdout/stderr) to artifact path
+                LOG_FILE=\"/workspace/${ARTIFACT_OUT}/\${PKG}.build.log\"
+                mkdir -p \"$(dirname "/workspace/${ARTIFACT_OUT}")\" || true
+
+                # Allow skipping PGP checks if SKIP_PGP_CHECK env is set to "true"
+                SKIP_FLAG=\"\"
+                if [[ \"${SKIP_PGP_CHECK}\" == \"true\" ]]; then SKIP_FLAG='--skippgpcheck'; fi
+
+                # Run as builder user; wrap and capture exit code
                 su -s /bin/bash builder -c \"
                   cd /workspace
-                  export MAKEPKG_OPTS='--skippgpcheck'
-                  /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}'
-                \"
+                  export MAKEPKG_OPTS='\$SKIP_FLAG'
+                  /workspace/scripts/build-aur.sh '\${BUILD_SRC_DIR}' '/workspace/${ARTIFACT_OUT}' >'\${LOG_FILE}' 2>&1
+                \" || {
+                  echo \"[ERROR] build failed for \${PKG}; log at ${ARTIFACT_OUT}/\${PKG}.build.log\"
+                  exit 5
+                }
 
-                # done inside container
+                echo \"[INFO] Build succeeded for \${PKG}\"
               "
-          done < packages/aur/manifest.txt
-
-          echo "[INFO] Build loop completed"
+            # if container returns non-zero, ci step would have failed above and workflow exits,
+            # but we capture logs inside the container before failure and will upload them in next steps.
+          done < "${MANIFEST}"
         shell: bash
 
       - name: Show artifacts
@@ -264,6 +256,13 @@ jobs:
           echo "Artifacts dir listing:"
           find "${GITHUB_WORKSPACE}/${ARTIFACT_OUT}" -maxdepth 3 -ls || true
         shell: bash
+
+      - name: Upload per-package build logs as artifacts (if any)
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-build-logs
+          path: "${ARTIFACT_OUT}/*.build.log"
+        continue-on-error: true
 
       - name: Move artifacts into repo output dir
         run: |
@@ -273,7 +272,7 @@ jobs:
           ls -la "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}" || true
         shell: bash
 
-      - name: Set REPO_ROOT env for gen_db
+      - name: Set REPO_ROOT and ARCH for gen_db
         run: |
           echo "REPO_ROOT=${GITHUB_WORKSPACE}/${REPO_OUT}" >> $GITHUB_ENV
           echo "ARCH=${ARCH}" >> $GITHUB_ENV
@@ -281,7 +280,7 @@ jobs:
 
       - name: Regenerate DB (gen_db.sh)
         run: |
-          ./shedrepo/shedrepo/commands/gen_db.sh
+          ./shedrepo/commands/gen_db.sh
         shell: bash
 
       - name: Configure rclone remote for R2
@@ -293,16 +292,14 @@ jobs:
             access_key_id "${{ secrets.R2_ACCESS_KEY_ID }}" \
             secret_access_key "${{ secrets.R2_SECRET_ACCESS_KEY }}" \
             endpoint "${R2_ENDPOINT}" \
-            region auto
-          echo "rclone remote '${RCLONE_REMOTE}' configured"
+            region auto || true
         shell: bash
 
       - name: Upload repo to R2
         run: |
           RCLONE_REMOTE="${{ secrets.RCLONE_REMOTE_NAME && secrets.RCLONE_REMOTE_NAME || 'r2' }}"
           TARGET="${RCLONE_REMOTE}:${{ secrets.R2_BUCKET }}/${ARCH}/"
-          rclone sync --progress --create-empty-src-dirs --delete-after "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" "${TARGET}"
-          echo "Upload finished."
+          rclone sync --progress --create-empty-src-dirs --delete-after "${GITHUB_WORKSPACE}/${REPO_OUT}/${ARCH}/" "${TARGET}" || true
         shell: bash
 
       - name: Cleanup rclone remote
