@@ -121,16 +121,16 @@ jobs:
                 
                 # Extract validpgpkeys for GPG signature verification
                 validpgpkeys_raw=\"\"
-                validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/)/ {print}' PKGBUILD | sed 's/validpgpkeys=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
+                validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/)/ {print}' PKGBUILD 2>/dev/null | sed 's/validpgpkeys=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs || true)
                 echo \"[DEBUG] Extracted validpgpkeys: '\${validpgpkeys_raw}'\"
                 
                 # Also try single-line format
                 if [[ -z \"\${validpgpkeys_raw}\" ]]; then
-                  validpgpkeys_raw=\$(grep -oP 'validpgpkeys=\\(\\K[^)]+' PKGBUILD 2>/dev/null | sed 's/[\\047\"]//g' | xargs)
+                  validpgpkeys_raw=\$(grep -oP 'validpgpkeys=\\(\\K[^)]+' PKGBUILD 2>/dev/null | sed 's/[\\047\"]//g' | xargs || true)
                   echo \"[DEBUG] Single-line extraction result: '\${validpgpkeys_raw}'\"
                 fi
                 
-                if [[ -n \"\${validpgpkeys_raw}\" ]]; then
+                if [[ -n \"\${validpgpkeys_raw// }\" ]]; then
                   echo \"[INFO] Found GPG keys to import: \${validpgpkeys_raw}\"
                   for key in \${validpgpkeys_raw}; do
                     echo \"[INFO] Importing GPG key as root: \${key}\"
