@@ -119,6 +119,20 @@ jobs:
                 makedeps_raw=\$(awk '/^makedepends=\\(/,/)/ {print}' PKGBUILD | sed 's/makedepends=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
                 echo \"[DEBUG] Extracted makedepends: \${makedeps_raw}\"
                 
+                # Extract validpgpkeys for GPG signature verification
+                validpgpkeys_raw=\"\"
+                validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/)/ {print}' PKGBUILD | sed 's/validpgpkeys=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
+                if [[ -n \"\${validpgpkeys_raw}\" ]]; then
+                  echo \"[INFO] Found GPG keys to import: \${validpgpkeys_raw}\"
+                  for key in \${validpgpkeys_raw}; do
+                    echo \"[INFO] Importing GPG key: \${key}\"
+                    gpg --keyserver keyserver.ubuntu.com --recv-keys \"\${key}\" 2>&1 || \
+                      gpg --keyserver keys.openpgp.org --recv-keys \"\${key}\" 2>&1 || \
+                      gpg --keyserver pgp.mit.edu --recv-keys \"\${key}\" 2>&1 || \
+                      echo \"[WARN] Could not import key \${key} from any keyserver\"
+                  done
+                fi
+                
                 # Combine both dependency lists
                 all_deps_raw=\"\${depends_raw} \${makedeps_raw}\"
                 echo \"[DEBUG] Combined dependencies: \${all_deps_raw}\"
