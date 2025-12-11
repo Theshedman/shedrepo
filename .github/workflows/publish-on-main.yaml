@@ -123,14 +123,28 @@ jobs:
                 validpgpkeys_raw=\"\"
                 validpgpkeys_raw=\$(awk '/^validpgpkeys=\\(/,/)/ {print}' PKGBUILD | sed 's/validpgpkeys=(//; s/).*//; s/[\\047\"]//g' | tr '\\n' ' ' | xargs)
                 echo \"[DEBUG] Extracted validpgpkeys: '\${validpgpkeys_raw}'\"
+                
+                # Also try single-line format
+                if [[ -z \"\${validpgpkeys_raw}\" ]]; then
+                  validpgpkeys_raw=\$(grep -oP 'validpgpkeys=\\(\\K[^)]+' PKGBUILD 2>/dev/null | sed 's/[\\047\"]//g' | xargs)
+                  echo \"[DEBUG] Single-line extraction result: '\${validpgpkeys_raw}'\"
+                fi
+                
                 if [[ -n \"\${validpgpkeys_raw}\" ]]; then
                   echo \"[INFO] Found GPG keys to import: \${validpgpkeys_raw}\"
                   for key in \${validpgpkeys_raw}; do
-                    echo \"[INFO] Importing GPG key: \${key}\"
+                    echo \"[INFO] Importing GPG key as root: \${key}\"
                     gpg --batch --keyserver keyserver.ubuntu.com --recv-keys \"\${key}\" 2>&1 | head -5 || \
                       gpg --batch --keyserver keys.openpgp.org --recv-keys \"\${key}\" 2>&1 | head -5 || \
                       gpg --batch --keyserver pgp.mit.edu --recv-keys \"\${key}\" 2>&1 | head -5 || \
                       echo \"[WARN] Could not import key \${key} from any keyserver\"
+                    
+                    # Also import for builder user
+                    echo \"[INFO] Importing GPG key for builder user: \${key}\"
+                    su -s /bin/bash builder -c \"gpg --batch --keyserver keyserver.ubuntu.com --recv-keys '\${key}'\" 2>&1 | head -5 || \
+                      su -s /bin/bash builder -c \"gpg --batch --keyserver keys.openpgp.org --recv-keys '\${key}'\" 2>&1 | head -5 || \
+                      su -s /bin/bash builder -c \"gpg --batch --keyserver pgp.mit.edu --recv-keys '\${key}'\" 2>&1 | head -5 || \
+                      echo \"[WARN] Could not import key \${key} for builder user\"
                   done
                 else
                   echo \"[INFO] No GPG keys found in PKGBUILD\"
